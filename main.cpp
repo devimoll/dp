@@ -17,7 +17,7 @@ void mul_s_v(double*, const double, const double*);
 void mul_s_m(double*, const double, const double*);
 void inv_m(double*, const double*);
 
-const double tl = 400; // 線路長 track length
+const double tl = 2000; // 線路長 track length
 const double max_vel = 40; // 最高速度 maximum velocity[km/h]
 const double sim_time = 50;   // simulation time
 const double t_i = 0;
@@ -185,7 +185,7 @@ void traction(double *F, double *dFdv, const double u, const double v)
     //printf("traction %f %f %f %f %f %f %f %f %f\n", u, v, f_a, v_a1, v_a2, f_b, v_b, F, dFdv);
 }
 
-void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double curr_v, double dt, const double u)
+void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double curr_v, double dt, const double u)
 {
     curr_v = kmh2ms(curr_v);
     double F;
@@ -329,24 +329,24 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
 
     ////energy calculation
     if (u > 0) {
-        dW  = 0.5 * (F * curr_v + Fn * vn ) * dt / eta_a / 3600 * 0.001 * 1.1;  //[m/s]*[N]*[s]=[J]=1/(3.6*10^6)[kWh]
-        //dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt / eta / 3600 / 1000 *1.1;  
-        //dW  = (F + 0.5*dFdv*dv) * dx / eta / 3600 / 1000;  
-        //dW  =(a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt / eta / 3600 / 1000;  
+        *dW  = 0.5 * (F * curr_v + Fn * vn ) * dt / eta_a / 3600 * 0.001 * 1.1;  //[m/s]*[N]*[s]=[J]=1/(3.6*10^6)[kWh]
+        //*dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt / eta / 3600 / 1000 *1.1;  
+        //*dW  = (F + 0.5*dFdv*dv) * dx / eta / 3600 / 1000;  
+        //*dW  =(a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt / eta / 3600 / 1000;  
     }
     else if (u == 0) {
-        dW  = 0;
+        *dW  = 0;
     }
     else {
-        dW  =  0.5 * (F * curr_v + Fn * vn ) * dt * eta_b / 3600 * 0.001 * 1.1;
-        //dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt * eta / 3600 / 1000 *1.1 ;   
-        //dW  = (F + 0.5*dFdv*dv) * dx * eta / 3600 / 1000;     
-        //dW  = (a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt * eta / 3600 / 1000;     
+        *dW  =  0.5 * (F * curr_v + Fn * vn ) * dt * eta_b / 3600 * 0.001 * 1.1;
+        //*dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt * eta / 3600 / 1000 *1.1 ;   
+        //*dW  = (F + 0.5*dFdv*dv) * dx * eta / 3600 / 1000;     
+        //*dW  = (a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt * eta / 3600 / 1000;     
     }
 
-//printf("%f %f %f\n", dW, next_xv(0), next_xv(1));
-    next_x = next_xv[0];
-    next_v = next_xv[1];
+//printf("%f %f %f\n", *dW, next_xv(0), next_xv(1));
+    *next_x = next_xv[0];
+    *next_v = next_xv[1];
 }
 
 double val2latno(double n, const std::vector<double> *latt, int latt_size)
@@ -469,7 +469,7 @@ void calc(int i, int j, int dt, const std::vector<double> *x_latt, const std::ve
             double next_x;
             double next_v;
             double dW;
-            difsolve(next_x, next_v, dW, (*x_latt)[j], (*v_latt)[k], dt, u_notch[u]);
+            difsolve(&next_x, &next_v, &dW, (*x_latt)[j], (*v_latt)[k], dt, u_notch[u]);
             //if (t_size - 2 - i < 3)
             //printf("notch %f, x %f v %f dW %f\n", u_notch[u], next_x, next_v, dW);
             // speed limitation線路の形状による速度制限
@@ -643,7 +643,7 @@ int main()
         double next_x;
         double next_v;
         double dW;
-        difsolve(next_x, next_v, dW, x_solved[i], v_solved[i], dt, u_solved[i]); //solving the next state by difsolve program
+        difsolve(&next_x, &next_v, &dW, x_solved[i], v_solved[i], dt, u_solved[i]); //solving the next state by difsolve program
       
         x_solved[i + 1] = next_x;
         v_solved[i + 1] = next_v;
