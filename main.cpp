@@ -3,15 +3,16 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <thread>
 #include <Eigen/Dense>
 
 #define _USE_MATH_DEFINES
 #define GNUPLOT "gnuplot -persist"
 #define NX 720
  
-const double tl = 400; // 線路長 track length
-const double max_vel = 40; // 最高速度 maximum velocity[km/h]
-const double sim_time = 60;   // simulation time
+const double tl = 600; // 線路長 track length
+const double max_vel = 50; // 最高速度 maximum velocity[km/h]
+const double sim_time = 75;   // simulation time
 const double t_i = 0;
 const double t_f = sim_time;
 const double v_i = 0;
@@ -34,6 +35,8 @@ const double g = 9.8; // gravitational constant [m/s^2]
 const double l = 30;  // train's length[m]
 std::vector<double> u_notch{-1, -0.9, -0.5, -0.1, 0, 0.1, 0.5, 0.9, 1};
 const int notch_count = u_notch.size();
+const double pen1 = std::pow(10, 6);
+const double pen2 = std::pow(10, 100);
 
 double ms2kmh(double v)
 {
@@ -45,9 +48,9 @@ double kmh2ms(double v)
     return v / 3.6;
 }
 
+
 Eigen::Vector2d traction(const double u, const double v)
 {
-    // powering
     double f_a = 3.3 * 1000 / 3.6; // [N/t]
     double v_a1 = 40 / 3.6;    // [km/3.5*1000/3.6h]->[m/s]
     double v_a2 = 80 / 3.6;   // [km/3.5*1000/3.6h]->[m/s]
@@ -241,9 +244,9 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     next_v = next_xv(1);
 }
 
-double val2latno(double n, std::vector<double> &latt, int latt_size)
+double val2latno(double n, const std::vector<double> *latt, int latt_size)
 {
-    n = std::max(std::min(n, latt[latt_size - 1]), latt[0]);
+    n = std::max(std::min(n, (*latt)[latt_size - 1]), (*latt)[0]);
 
 //std::cout << static_cast<double>(latt.size()) << std::endl;
 /*
@@ -280,7 +283,7 @@ double val2latno(double n, std::vector<double> &latt, int latt_size)
 //std::cout << " return " << i << std::endl;
 */
     for (int i = 0; i < latt_size - 1; i++) {
-        if (latt[i] <= n && n < latt[i + 1]) {
+        if ((*latt)[i] <= n && n < (*latt)[i + 1]) {
             return i;
         }
     }
@@ -288,12 +291,12 @@ double val2latno(double n, std::vector<double> &latt, int latt_size)
     return latt_size - 1;
 }
 
-double interpolate(std::vector<std::vector<std::vector<double>>> &label, int time, double next_x, double next_v, std::vector<double> &x_latt, std::vector<double> &v_latt, const int x_latt_size, const int v_latt_size)
+double interpolate(const std::vector<std::vector<std::vector<double>>> *label, int time, double next_x, double next_v, const std::vector<double> *x_latt, const std::vector<double> *v_latt, const int x_latt_size, const int v_latt_size)
 {
     int k = val2latno(next_x, x_latt, x_latt_size);
     //printf(" ");
     int j = val2latno(next_v, v_latt, v_latt_size);
-if (time == label.size() - 4 + 1) {
+if (time == label->size() - 4 + 1) {
 //printf("k=%d j=%d time=%d next_x=%f, next_v=%f %f %f\n", k, j, time, next_x, next_v, x_latt[k], v_latt[j]);
 }
     /*
@@ -318,38 +321,105 @@ if (time == label.size() - 4 + 1) {
     puts("");
 */
 //printf("label size %lu %lu\n", label.size(), label[0].size());
-    double u_11 = label[time][k][j];   // (k,j)
-    double u_12 = label[time][std::min(k + 1, x_latt_size - 1)][j]; // (k+1,j)
-    double u_21 = label[time][k][std::min(j + 1, v_latt_size - 1)]; // (k,j+1)
-    double u_22 = label[time][std::min(k + 1, x_latt_size - 1)][std::min(j + 1, v_latt_size - 1)];   // (k+1,j+1)
+    double u_11 = (*label)[time][k][j];   // (k,j)
+    double u_12 = (*label)[time][std::min(k + 1, x_latt_size - 1)][j]; // (k+1,j)
+    double u_21 = (*label)[time][k][std::min(j + 1, v_latt_size - 1)]; // (k,j+1)
+    double u_22 = (*label)[time][std::min(k + 1, x_latt_size - 1)][std::min(j + 1, v_latt_size - 1)];   // (k+1,j+1)
         //puts("d");
 
     double g1;
     double g2;
 
-    if (k == x_latt.size() - 1) {
+    if (k == x_latt->size() - 1) {
         g1 = u_11;  // u_12 = u_11
         g2 = u_21;  // u_22 = u_21
     }
     else {
-        g1 = ((u_12 * (next_x - x_latt[k])) + (u_11 * (x_latt[std::min(k + 1, x_latt_size - 1)] - next_x))) / (x_latt[std::min(k + 1, x_latt_size - 1)] - x_latt[k]);
-        g2 = ((u_22 * (next_x - x_latt[k])) + (u_21 * (x_latt[std::min(k + 1, x_latt_size - 1)] - next_x))) / (x_latt[std::min(k + 1, x_latt_size - 1)] - x_latt[k]);
+        g1 = ((u_12 * (next_x - (*x_latt)[k])) + (u_11 * ((*x_latt)[std::min(k + 1, x_latt_size - 1)] - next_x))) / ((*x_latt)[std::min(k + 1, x_latt_size - 1)] - (*x_latt)[k]);
+        g2 = ((u_22 * (next_x - (*x_latt)[k])) + (u_21 * ((*x_latt)[std::min(k + 1, x_latt_size - 1)] - next_x))) / ((*x_latt)[std::min(k + 1, x_latt_size - 1)] - (*x_latt)[k]);
     }
 
     double u;
-if (time == label.size() - 4 + 1) {
-//printf("u11=%f u12=%f u21=%f u22=%f g1=%f g2=%f\n", u_11, u_12, u_21, u_22, g1, g2);
-}
+//if (time == label.size() - 4 + 1) {
+////printf("u11=%f u12=%f u21=%f u22=%f g1=%f g2=%f\n", u_11, u_12, u_21, u_22, g1, g2);
+//}
 
-    if (j == v_latt.size() - 1) {
+    if (j == v_latt->size() - 1) {
         u = g1; // g1 = g2
     }
     else {
-        u = ((g2 * (next_v - v_latt[j])) + (g1 * (v_latt[std::min(j + 1, v_latt_size - 1)] - next_v))) / (v_latt[std::min(j + 1, v_latt_size - 1)] - v_latt[j]);
+        u = ((g2 * (next_v - (*v_latt)[j])) + (g1 * ((*v_latt)[std::min(j + 1, v_latt_size - 1)] - next_v))) / ((*v_latt)[std::min(j + 1, v_latt_size - 1)] - (*v_latt)[j]);
     }
 //printf("%f\n", u);
     return u;
 }
+
+void calc(int i, int j, int dt, const std::vector<double> *x_latt, const std::vector<double> *v_latt, const std::vector<double> *t_latt, std::vector<std::vector<std::vector<double>>> *e_opt, std::vector<std::vector<std::vector<double>>> *u_opt)
+{
+    for (int k = 0; k < v_latt->size(); k++) {
+        double e_opt0 = pen1;
+        double u_opt0 = 0;
+        double e_opt1 = 0;
+        for (int u = 0; u < notch_count; u++) {
+            double next_x;
+            double next_v;
+            double dW;
+            difsolve(next_x, next_v, dW, (*x_latt)[j], (*v_latt)[k], dt, u_notch[u]);
+            //if (t_size - 2 - i < 3)
+            //printf("notch %f, x %f v %f dW %f\n", u_notch[u], next_x, next_v, dW);
+            // speed limitation線路の形状による速度制限
+            if (((*x_latt)[j] < 100) && ((*v_latt)[k] >= 60)) {
+                e_opt1 = pen1;   
+            }
+            else if (((*x_latt)[j] >= 100 && (*x_latt)[j] < 450 && (*v_latt)[k] >= 40)) {
+                e_opt1 = pen1;   
+            }
+            else if (((*x_latt)[j] >= 450 && (*x_latt)[j] < 550 && (*v_latt)[k] >= 25)) {
+                e_opt1 = pen1;   
+            }
+            else if (((*x_latt)[j] >= 550 && (*x_latt)[j] < 800 && (*v_latt)[k] >= 40)) {
+                e_opt1 = pen1;   
+            }
+            /*  
+            else if ((x_latt[j] > x_latt[x_latt.size() - 1])) {
+                e_opt1 = pen2;   
+            }*/
+            else {
+                e_opt1 = dW + interpolate(e_opt, i + 1, next_x, next_v, x_latt, v_latt, x_latt->size(), v_latt->size()); // linear interpolation by interpol program
+            }
+            /*
+            if (i==t_size-4) {
+            //printf("notch %f, x %f v %f dW %f\n", u_notch[u], next_x, next_v, dW);
+                //std::cout << e_opt1 << std::endl;
+                
+    for (double u : u_opt[t_size - 4][0]) {
+    printf("%f\n ", u);
+    }
+    return 0;
+                //std::cout << u +1 << " " << dW << " " << e_opt0 << " " << u_notch[u] << std::endl;
+            }*/
+            //e_opt1 = dW + interpol(e_par,X_n,x_latt,v_latt,x_nola,v_nola); %linear interpolation by interpol program
+            if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
+                e_opt0 = e_opt1;
+                u_opt0 = u_notch[u];
+            }
+        }
+        // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーが求まった。
+        (*e_opt)[i][j][k] = e_opt0;
+        (*u_opt)[i][j][k] = u_opt0;
+        //printf("%f %f\n", e_opt0, u_opt0);
+    }
+}
+
+void assign(int time, int n, int x_latt_size, int nproc, int dt, const std::vector<double> *x_latt, const std::vector<double> *v_latt, const std::vector<double> *t_latt, std::vector<std::vector<std::vector<double>>> *e_opt, std::vector<std::vector<std::vector<double>>> *u_opt)
+{
+    for (int j = n; j < x_latt_size; j += nproc) {
+        calc(time, j, dt, x_latt, v_latt, t_latt, e_opt, u_opt);
+    }
+}
+
+const double penalty_v = 1;
+const double penalty_x = 1;
 
 int main()
 {
@@ -369,8 +439,8 @@ int main()
     x_latt.push_back(tl + 10);
     //printf("%d\n", x_latt.size());
 
-    for (double i = 0; i < 10; i+=0.25) {v_latt.push_back(i);}
-    for (double i = 10; i <= max_vel; i++) {v_latt.push_back(i);}
+    for (double i = 0; i < 20; i+=0.25) {v_latt.push_back(i);}
+    for (double i = 20; i <= max_vel; i++) {v_latt.push_back(i);}
     //printf("%d\n", v_latt.size());
     
     for (double i = 0; i <= sim_time; i++) {
@@ -381,15 +451,12 @@ int main()
     const int v_size = v_latt.size();
     const int t_size = t_latt.size();
 
-    const double penalty_v = 1;
-    const double penalty_x = 1;
-
     std::vector<std::vector<std::vector<double>>> e_opt(t_latt.size(), std::vector<std::vector<double>>(x_latt.size(), std::vector<double>(v_latt.size(), 0)));
     std::vector<std::vector<std::vector<double>>> u_opt(t_latt.size(), std::vector<std::vector<double>>(x_latt.size(), std::vector<double>(v_latt.size(), 0)));
 
     printf("t %d x %d v %d\n", e_opt.size(), e_opt[0].size(), e_opt[0][0].size());
 
-    puts("start backward search.");
+    printf("start backward search.\n");
 
     for (int i = 0; i < x_size; i++) {
         for (int j = 0; j < v_size; j++) {
@@ -400,68 +467,26 @@ int main()
     int x_latt_size = x_latt.size();
     int v_latt_size = v_latt.size();
 
-    double pen1 = std::pow(10, 6);
-    double pen2 = std::pow(10, 100);
+    unsigned int nproc = std::thread::hardware_concurrency();   // number of processer(実際はスレッド数)
+    std::vector<std::thread*> threads(nproc);
+
 
     auto start = std::chrono::system_clock::now();
     for (int i = t_size - 2; i >= 0; i--) {
-        printf("%d / %d\n", t_size - i - 1, t_size);
+        printf("\rcalculating %d / %d", t_size - i, t_size);
+        fflush(stdout);
         double dt = t_latt[i + 1] - t_latt[i];
-        for (int j = 0; j < x_latt_size; j++) {
                 //std::cout << j << std::endl;
-            for (int k = 0; k < v_latt_size; k++) {
-                double e_opt0 = pen1;
-                double u_opt0 = 0;
-                double e_opt1 = 0;
-                for (int u = 0; u < notch_count; u++) {
-                    double next_x;
-                    double next_v;
-                    double dW;
-                    difsolve(next_x, next_v, dW, x_latt[j], v_latt[k], dt, u_notch[u]);
-                    //if (t_size - 2 - i < 3)
-                    //printf("notch %f, x %f v %f dW %f\n", u_notch[u], next_x, next_v, dW);
-                    // speed limitation線路の形状による速度制限
-                    if ((x_latt[j] < 100) && (v_latt[k] >= 60)) {
-                        e_opt1 = pen1;   
-                    }
-                    else if ((x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 40)) {
-                        e_opt1 = pen1;   
-                    }
-                    else if ((x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 25)) {
-                        e_opt1 = pen1;   
-                    }
-                    else if ((x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 40)) {
-                        e_opt1 = pen1;   
-                    }
-                    /*  
-                    else if ((x_latt[j] > x_latt[x_latt.size() - 1])) {
-                        e_opt1 = pen2;   
-                    }*/
-                    else {
-                        e_opt1 = dW + interpolate(e_opt, i + 1, next_x, next_v, x_latt, v_latt, x_latt_size, v_latt_size); // linear interpolation by interpol program
-                    }
-                    if (i==t_size-4) {
-                    //printf("notch %f, x %f v %f dW %f\n", u_notch[u], next_x, next_v, dW);
-                        //std::cout << e_opt1 << std::endl;
-                        /*
-    for (double u : u_opt[t_size - 4][0]) {
-        printf("%f\n ", u);
-    }
-    return 0;*/
-                        //std::cout << u +1 << " " << dW << " " << e_opt0 << " " << u_notch[u] << std::endl;
-                    }
-                    //e_opt1 = dW + interpol(e_par,X_n,x_latt,v_latt,x_nola,v_nola); %linear interpolation by interpol program
-                    if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
-                        e_opt0 = e_opt1;
-                        u_opt0 = u_notch[u];
-                    }
-                }
-                // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーが求まった。
-                e_opt[i][j][k] = e_opt0;
-                u_opt[i][j][k] = u_opt0;
-                
-            }
+        for (int m = 0; m < nproc; m++) {
+            threads[m] = new std::thread(assign, i, m, x_latt_size, nproc, dt, &x_latt, &v_latt, &t_latt, &e_opt, &u_opt);
         }
+        for (std::thread *t : threads) {
+            t->join();
+        }
+        for (std::thread *t : threads) {
+            delete t;
+        }
+
         /*
                 if (i == 59) {
                     //std::cout << e_opt[i][j][k] << " " << u_opt[i][j][k] << std::endl;
@@ -472,17 +497,17 @@ int main()
     auto end = std::chrono::system_clock::now();
     auto dur = end - start;
     auto msec = std::chrono::duration_cast<std::chrono::milliseconds>(dur).count();
-    std::cout << msec << " ms \n";
+    std::cout << std::endl << msec << " ms" << std::endl;
 
 /*
     for (double u : u_opt[t_size - 4][0]) {
         printf("%f\n ", u);
     }
     return 0;
-  */
+  
     for (double u : u_opt[0][180]) {
         //printf("%f\n ", u);
-    }/*
+    }
     puts("");
     for (double u : u_opt[50][100]) {
         printf("%f\n ", u)
@@ -507,8 +532,8 @@ int main()
     for (int i = 0; i < t_latt.size() - 1; i++) {   //start searching from the intial time
         double dt = t_latt[i+1] - t_latt[i];
 
-        u_solved[i] = interpolate(u_opt, i, x_solved[i], v_solved[i], x_latt, v_latt, x_latt_size, v_latt_size);    //linear interpolation by intepol program
-        printf("%d %f %f %f\n ", i, u_solved[i], x_solved[i], v_solved[i]);
+        u_solved[i] = interpolate(&u_opt, i, x_solved[i], v_solved[i], &x_latt, &v_latt, x_latt_size, v_latt_size);    //linear interpolation by intepol program
+        //printf("%d %f %f %f\n ", i, u_solved[i], x_solved[i], v_solved[i]);
       
         double next_x;
         double next_v;
@@ -546,6 +571,12 @@ int main()
         exit(1);
     }
 
+    fprintf(gp, "set multiplot\n\
+    set lmargin screen 0.1\n\
+    set rmargin screen 0.9\n\
+    set tmargin screen 0.9\n\
+    set bmargin screen 0.7\n");
+
     fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
     fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(u_notch.begin(), u_notch.end()), *std::max_element(u_notch.begin(), u_notch.end()));
     fprintf(gp, "plot '-' with lines linetype 1 title \"Notch\"\n");
@@ -555,11 +586,49 @@ int main()
     }
     fprintf(gp, "e\n");
 
+    fprintf(gp, "set lmargin screen 0.1\n\
+    set rmargin screen 0.9\n\
+    set tmargin screen 0.6\n\
+    set bmargin screen 0.4\n");
+
+    fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
+    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(e_solved.begin(), e_solved.end()), *std::max_element(e_solved.begin(), e_solved.end()));
+    fprintf(gp, "plot '-' with lines linetype 1 title \"energy\"\n");
+
+    for (int i = 0; i < t_size; i++) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], e_solved[i]);
+    }
+    fprintf(gp, "e\n");
+
+    fprintf(gp, "set lmargin screen 0.1\n\
+    set rmargin screen 0.9\n\
+    set tmargin screen 0.3\n\
+    set bmargin screen 0.1\n\
+    set ylabel \"velocity\"\n\
+    set ytics nomirror\n\
+    set y2label \"time\"\n\
+    set y2tics\n");
+
+    fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
+    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(v_solved.begin(), v_solved.end()), *std::max_element(v_solved.begin(), v_solved.end()));
+    fprintf(gp, "set y2range [%f:%f]\n", *std::min_element(t_solved.begin(), t_solved.end()), *std::max_element(t_solved.begin(), t_solved.end()));
+    fprintf(gp, "plot '-' with lines linetype 1 title \"energy\"\n");
+
+    for (int i = 0; i < t_size; i++) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], v_solved[i]);
+    }
+    fprintf(gp, "axis x1y1\n");
+    fprintf(gp, "replot '-' with lines linetype 1 title \"time\"\n");
+    for (int i = 0; i < t_size; i++) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], t_solved[i]);
+    }
+    fprintf(gp, "axis x1y2\n");
+    fprintf(gp, "e\n");
+/////////縦軸を２つにしてグラフ描画する方法がわからぬ
     if (pclose(gp) == EOF) {
         fprintf(stderr, "Error: cannot close \"%s\".\n", GNUPLOT);
         exit(2);
     }
-
 
     return 0;
 }
