@@ -4,15 +4,22 @@
 #include <chrono>
 #include <algorithm>
 #include <thread>
-#include <Eigen/Dense>
 
 #define _USE_MATH_DEFINES
 #define GNUPLOT "gnuplot -persist"
 #define NX 720
  
-const double tl = 600; // 線路長 track length
-const double max_vel = 50; // 最高速度 maximum velocity[km/h]
-const double sim_time = 75;   // simulation time
+void add_m_m(double*, const double*, const double*);
+void sum_m_m(double*, const double*, const double*);
+void mul_m_v(double*, const double*, const double*);
+void add_v_v(double*, const double*, const double*);
+void mul_s_v(double*, const double, const double*);
+void mul_s_m(double*, const double, const double*);
+void inv_m(double*, const double*);
+
+const double tl = 400; // 線路長 track length
+const double max_vel = 40; // 最高速度 maximum velocity[km/h]
+const double sim_time = 50;   // simulation time
 const double t_i = 0;
 const double t_f = sim_time;
 const double v_i = 0;
@@ -38,6 +45,69 @@ const int notch_count = u_notch.size();
 const double pen1 = std::pow(10, 6);
 const double pen2 = std::pow(10, 100);
 
+// 全部2次元
+void add_m_m(double *m_ans, const double *m1, const double *m2)
+{
+    m_ans[0] = m1[0] + m2[0];
+    m_ans[1] = m1[1] + m2[1];
+    m_ans[2] = m1[2] + m2[2];
+    m_ans[3] = m1[3] + m2[3];
+}
+
+void sub_m_m(double *m_ans, const double *m1, const double *m2)
+{
+    m_ans[0] = m1[0] - m2[0];
+    m_ans[1] = m1[1] - m2[1];
+    m_ans[2] = m1[2] - m2[2];
+    m_ans[3] = m1[3] - m2[3];
+}
+
+void mul_m_v(double *v_ans, const double *m, const double *v)
+{
+    v_ans[0] = m[0] * v[0] + m[1] * v[1];
+    v_ans[1] = m[2] * v[0] + m[3] * v[1];
+}
+
+void add_v_v(double *v_ans, const double *v1, const double *v2)
+{
+    v_ans[0] = v1[0] + v2[0];
+    v_ans[1] = v1[1] + v2[1];
+}
+// スカラー倍
+void mul_s_v(double *v_ans, const double s, const double *v)
+{
+    v_ans[0] = s * v[0];
+    v_ans[1] = s * v[1];
+}
+
+void mul_s_m(double *m_ans, const double s, const double *m)
+{
+    m_ans[0] = s * m[0];
+    m_ans[1] = s * m[1];
+    m_ans[2] = s * m[2];
+    m_ans[3] = s * m[3];
+}
+// 逆行列
+void inv_m(double *m_ans, const double *m)
+{
+    // m_ans == mのときは計算がうまくいかなくなるから別の変数を用いる。
+    double a = m[0];
+    double b = m[1];
+    double c = m[2];
+    double d = m[3];
+    double det = a * d - b * c;
+
+    if (det == 0) {
+        printf("det = 0\n");
+        exit(1);
+    }
+
+    m_ans[0] = d / det;
+    m_ans[1] = -b / det;
+    m_ans[2] = -c / det;
+    m_ans[3] = a / det;
+}
+
 double ms2kmh(double v)
 {
     return 3.6 * v;
@@ -48,8 +118,28 @@ double kmh2ms(double v)
     return v / 3.6;
 }
 
+void solve_next_state(double *next_xv, const double *curr_xv, const double *A, const double *B, const double dt, const double F0)
+{
+    double identity[4] = {1, 0, 0, 1};
+    double C[4];
+    double D[4];
+    double E[2];
+    double G[2];
+    double H[2];
 
-Eigen::Vector2d traction(const double u, const double v)
+    // 式: next_xv = (I - dt * A / 2).inverse() * (((I + dt * A / 2) * curr_xv) + (dt * B * F0));
+    mul_s_m(C, 0.5 * dt, A);  // C = 0.5 * dt * A
+    add_m_m(D, identity, C);
+    sub_m_m(C, identity, C);    // C = I - C
+    inv_m(C, C);
+
+    mul_m_v(E, D, curr_xv);
+    mul_s_v(G, F0 * dt, B);
+    add_v_v(H, E, G);
+    mul_m_v(next_xv, C, H);
+}
+
+void traction(double *F, double *dFdv, const double u, const double v)
 {
     double f_a = 3.3 * 1000 / 3.6; // [N/t]
     double v_a1 = 40 / 3.6;    // [km/3.5*1000/3.6h]->[m/s]
@@ -59,42 +149,40 @@ Eigen::Vector2d traction(const double u, const double v)
     double f_b = 4 * 1000 / 3.6;    // [N/t]
     double v_b = 80 / 3.6;    // [km/h]->[m/s]
 
-    double F = 0;
-    double dFdv = 0;
+    *F = 0;
+    *dFdv = 0;
 
 
     if (u > 0) {
         if (v < v_a1) {
-            F = f_a * u;
-            dFdv = 0;
+            *F = f_a * u;
+            *dFdv = 0;
         }
         else if (v < v_a2) {
-            F = f_a * u * v_a1 /v;
-            dFdv = -f_a * u * v_a1 / std::pow(v, 2);
+            *F = f_a * u * v_a1 /v;
+            *dFdv = -f_a * u * v_a1 / std::pow(v, 2);
         }
         else {
-            F = f_a * u * v_a1 * v_a2 / std::pow(v, 2);
-            dFdv = -2 * f_a * u * v_a1 * v_a2 / std::pow(v, 3);
+            *F = f_a * u * v_a1 * v_a2 / std::pow(v, 2);
+            *dFdv = -2 * f_a * u * v_a1 * v_a2 / std::pow(v, 3);
         }
     }
     else if (u < 0) {
         if (v < v_b) {
-            F = f_b * u;
-            dFdv = 0;
+            *F = f_b * u;
+            *dFdv = 0;
         }
         else {
-            F = f_b * u * std::pow(v_b / v, 2);
-            dFdv = -2 * f_b * u * std::pow(v_b, 2) / std::pow(v, 3);
+            *F = f_b * u * std::pow(v_b / v, 2);
+            *dFdv = -2 * f_b * u * std::pow(v_b, 2) / std::pow(v, 3);
         }
     }
     else {
-        F = 0;
-        dFdv = 0;
+        *F = 0;
+        *dFdv = 0;
     }
 
     //printf("traction %f %f %f %f %f %f %f %f %f\n", u, v, f_a, v_a1, v_a2, f_b, v_b, F, dFdv);
-    Eigen::Vector2d result(F, dFdv);
-    return result;
 }
 
 void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double curr_v, double dt, const double u)
@@ -103,9 +191,7 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     double F;
     double dFdv;
     // calculate traction force
-    Eigen::Vector2d tmp = traction(u, curr_v);
-    F = tmp(0);
-    dFdv = tmp(1);
+    traction(&F, &dFdv, u, curr_v);
     // calculation for train's resistance
     double R;
     double dRdv;
@@ -171,7 +257,7 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     alpha = dFdv - dRdv; //[N/(m/s)]
     alpha /= (1000 * weight); // //[N/(m/s)] -> [N/ton/(m/s)] -> [N/kg/(m/s)]=[(m/s/s)/(m/s)]
     beta = beta / (1000 * weight); // [N/(m/s)] -> [N/ton/(m/s)] -> [N/kg/(m/s)]=[(m/s/s)/(m/s)]
-
+/*
     Eigen::Matrix2d A;
     A(0, 0) = 0;
     A(1, 0) = beta;
@@ -189,7 +275,22 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     I(1, 0) = 0;
     I(0, 1) = 0;
     I(1, 1) = 1;
+    */
 
+    double A[4] = {0, 1, beta, alpha};
+    double B[2] = {0, 1};
+    double curr_xv[2] = {curr_x, curr_v};
+    double next_xv[2];
+
+    //solving the next state
+    solve_next_state(next_xv, curr_xv, A, B, dt, F0);
+
+    //printf("difsolve%f %f %f %f\n", next_xv(0), next_xv(1), curr_xv(0), curr_xv(1));
+    if (next_xv[1] < 0) {
+        dt *= (curr_xv[1] / (curr_xv[1] - next_xv[1]));
+        solve_next_state(next_xv, curr_xv, A, B, dt, F0);
+    }
+/*
     //solving the next state
     next_xv = (I - dt * A / 2).inverse() * (((I + dt * A / 2) * curr_xv) + (dt * B * F0));
 
@@ -198,13 +299,14 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
         dt *= (curr_xv(1) / (curr_xv(1) - next_xv(1)));
         next_xv = (I - dt * A / 2).inverse() * (((I + dt * A / 2) * curr_xv) + (dt * B * F0));
     }
-
-    double dx = next_xv(0) - curr_x;
-    double dv = next_xv(1) - curr_xv(1);
-    double vn = next_xv(1); //[m/s]
-    /**************************/
-    double Fn = weight * traction(u, curr_v)(0); //[N]
-    /**************************/
+*/
+    double dx = next_xv[0] - curr_x;
+    double dv = next_xv[1] - curr_xv[1];
+    double vn = next_xv[1]; //[m/s]
+    double Fn;
+    double dev_null;
+    traction(&Fn, &dev_null, u, curr_v); //[N]
+    Fn *= weight;
 
 /*
     double a = (dFdv * dv) / dt;
@@ -213,10 +315,13 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     double d = curr_v;
     */
 
+/*
     Eigen::Matrix2d tmptmp;
     tmptmp << 1, 0, 
               0, 3.6;
     next_xv = tmptmp * next_xv;
+    */
+    next_xv[1] = ms2kmh(next_xv[1]);
     // efficiency
     double eta_a = 0.9;
     double eta_b = 0.8;
@@ -240,8 +345,8 @@ void difsolve(double &next_x, double &next_v, double &dW, double curr_x, double 
     }
 
 //printf("%f %f %f\n", dW, next_xv(0), next_xv(1));
-    next_x = next_xv(0);
-    next_v = next_xv(1);
+    next_x = next_xv[0];
+    next_v = next_xv[1];
 }
 
 double val2latno(double n, const std::vector<double> *latt, int latt_size)
