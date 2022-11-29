@@ -13,9 +13,9 @@
 // difsolve関数が長い
 
 // constants that can be changed as needed
-const double tl = 400; // 線路長 track length
-const double max_vel = 40; // 最高速度 maximum velocity[km/h]
-const double sim_time = 55;   // simulation time
+const double tl = 1400; // 線路長 track length
+const double max_vel = 100; // 最高速度 maximum velocity[km/h]
+const double sim_time = 100;   // simulation time
 const double weight = 353; // [ton]
 // train's resistances correspond to train's speed [km/h]
 const double a = 14.2974;
@@ -35,6 +35,7 @@ const double pen1 = std::pow(10, 6);
 const double pen2 = std::pow(10, 100);
 const double penalty_v = 1;
 const double penalty_x = 1;
+// スレッド数
 const int nproc = std::thread::hardware_concurrency();   // number of processer(実際はスレッド数)
 //const int nproc = 1;
 
@@ -86,7 +87,6 @@ std::vector<std::vector<std::vector<double>>> e_opt(t_size, std::vector<std::vec
 std::vector<std::vector<std::vector<double>>> u_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
 
 std::vector<double> u_solved(t_size, 0);
-std::vector<double> t_solved(t_size, 0);
 std::vector<double> v_solved(t_size, 0);
 std::vector<double> x_solved(t_size, 0);
 std::vector<double> e_solved(t_size, 0);
@@ -484,7 +484,7 @@ double interpolate(const std::vector<std::vector<double>> &label, double next_x,
     return u;
 }
 
-void calc(int i, int j, int dt)
+void calc(int step, int j, int dt)
 {
     for (int k = 0; k < v_size; ++k) {
         double e_opt0 = pen1;
@@ -513,7 +513,7 @@ void calc(int i, int j, int dt)
                 e_opt1 = pen2;   
             }*/
             else {
-                e_opt1 = dW + interpolate(e_opt[i + 1], next_x, next_v); // linear interpolation by interpol program
+                e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program
             }
             if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
                 e_opt0 = e_opt1;
@@ -521,16 +521,16 @@ void calc(int i, int j, int dt)
             }
         }
         // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーが求まった。
-        e_opt[i][j][k] = e_opt0;
-        u_opt[i][j][k] = u_opt0;
+        e_opt[step][j][k] = e_opt0;
+        u_opt[step][j][k] = u_opt0;
     }
 }
 
 // 各スレッドに計算を割り当てる
-void assign_calculation(int time, int n, int dt)
+void assign_calculation(int step, int n, int dt)
 {
     for (int j = n; j < x_size; j += nproc) {
-        calc(time, j, dt);
+        calc(step, j, dt);
     }
 }
 
@@ -623,16 +623,16 @@ void do_backward_search()
             e_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
         }
     }
-    // 最後から2番目よりt=0まで探索
-    for (int t = t_size - 2; t >= 0; --t) {
-        printf("\rcalculating %d / %d", t_size - t, t_size);
+    // 最後から2番目より最初まで探索
+    for (int i = t_size - 2; i >= 0; --i) {
+        printf("\rcalculating %d / %d", t_size - i, t_size);
         fflush(stdout);
 
-        double dt = t_latt[t + 1] - t_latt[t];
+        double dt = t_latt[i + 1] - t_latt[i];
 
         // multi threading
         for (int n = 0; n < nproc; ++n) {
-            threads[n] = new std::thread(assign_calculation, t, n, dt);
+            threads[n] = new std::thread(assign_calculation, i, n, dt);
         }
         for (std::thread *thread : threads) {
             thread->join();
@@ -666,8 +666,13 @@ void do_forward_search()
 
 void draw_graphs()
 {
-    // 軸の最大値
-    double v_axis_max = std::ceil(*max_element(v_solved.begin(), v_solved.end()) * 0.1) * 10;
+    double x_error = x_solved.back() - x_f;
+    double v_error = v_solved.back() - v_f;
+
+    // 軸の最大値 10刻みにする
+    int v_axis_max = std::ceil(*max_element(v_solved.begin(), v_solved.end()) * 0.1) * 10;
+    // 5刻みにする
+    int e_axis_max = std::ceil(*max_element(e_solved.begin(), e_solved.end()) * 0.2) * 5;
 
     FILE *gp;
     if ((gp = popen(GNUPLOT, "w")) == NULL) {
@@ -675,60 +680,73 @@ void draw_graphs()
         exit(1);
     }
 
+    // 誤差やペナルティなど
+    fprintf(gp, "set label 1 at screen 0.1, 0.95 \"energy= %f kWh, p_x= %f, p_v= %f, e_x= %f, e_v= %f\"\n",
+    energy, penalty_x, penalty_v, x_error, v_error);
+
+    // 運転曲線
     fprintf(gp, "set multiplot\n\
     set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
     set tmargin screen 0.9\n\
-    set bmargin screen 0.7\n");
-
-    fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
-    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(u_notch.begin(), u_notch.end()), *std::max_element(u_notch.begin(), u_notch.end()));
-    fprintf(gp, "plot '-' with lines linetype 1 title \"Notch\"\n");
-
-    for (int i = 0; i < t_size; i++) {
-        fprintf(gp, "%f\t%f\n", x_solved[i], u_solved[i]);
+    set bmargin screen 0.7\n\
+    set xlabel \"Distance [m]\"\n\
+    set xtics nomirror\n\
+    set ylabel \"Speed [km/h]\"\n\
+    set ytics nomirror\n\
+    set y2tics nomirror\n\
+    set y2label \"Time [s]\"\n\
+    ");
+    fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
+    fprintf(gp, "set yrange [%d:%d]\n", 0, v_axis_max);
+    fprintf(gp, "set y2range [%d:%d]\n", 0, t_size);
+    fprintf(gp, "plot '-' with lines linetype 1 notitle axis x1y1, ");
+    fprintf(gp, "'-' with lines linetype 2 notitle axis x1y2\n");
+    for (int i = 0; i < t_size; ++i) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], v_solved[i]);
+    }
+    fprintf(gp, "e\n");
+    for (int i = 0; i < t_size; ++i) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], t_latt[i]);
     }
     fprintf(gp, "e\n");
 
+    // エネルギ
     fprintf(gp, "set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
     set tmargin screen 0.6\n\
-    set bmargin screen 0.4\n");
-
-    fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
-    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(e_solved.begin(), e_solved.end()), *std::max_element(e_solved.begin(), e_solved.end()));
-    fprintf(gp, "plot '-' with lines linetype 1 title \"energy\"\n");
+    set bmargin screen 0.4\n\
+    set ylabel \"Energy [kWh]\"\n\
+    set noy2tics\n\
+    set noy2label\n\
+    ");
+    fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
+    fprintf(gp, "set yrange [%d:%d]\n", 0, e_axis_max);
+    fprintf(gp, "plot '-' with lines linetype 1 notitle\n");
 
     for (int i = 0; i < t_size; ++i) {
         fprintf(gp, "%f\t%f\n", x_solved[i], e_solved[i]);
     }
     fprintf(gp, "e\n");
 
+    // ノッチ
     fprintf(gp, "set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
     set tmargin screen 0.3\n\
     set bmargin screen 0.1\n\
-    set ylabel \"velocity\"\n\
-    set ytics nomirror\n\
-    set y2label \"time\"\n\
-    set y2tics\n");
-
-    fprintf(gp, "set xrange [%f:%f]\n", 0., x_f);
-    fprintf(gp, "set yrange [%f:%f]\n", 0., v_axis_max);
-    fprintf(gp, "set y2range [%f:%f]\n", 0., t_size);
-    fprintf(gp, "plot '-' with lines linetype 1 title \"energy\"\n");
+    set ylabel \"Notch\"\n\
+    set xzeroaxis\n\
+    ");
+    fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
+    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(u_notch.begin(), u_notch.end()), *std::max_element(u_notch.begin(), u_notch.end()));
+    fprintf(gp, "plot '-' with lines linetype 1 notitle\n");
 
     for (int i = 0; i < t_size; i++) {
-        fprintf(gp, "%f\t%f\n", x_solved[i], v_solved[i]);
+        fprintf(gp, "%f\t%f\n", x_solved[i], u_solved[i]);
     }
-    fprintf(gp, "axis x1y1\n");
-    fprintf(gp, "replot '-' with lines linetype 1 title \"time\"\n");
-    for (int i = 0; i < t_size; i++) {
-        fprintf(gp, "%f\t%f\n", x_solved[i], t_solved[i]);
-    }
-    fprintf(gp, "axis x1y2\n");
     fprintf(gp, "e\n");
-/////////縦軸を２つにしてグラフ描画する方法がわからぬ
+
+
     if (pclose(gp) == EOF) {
         fprintf(stderr, "Error: cannot close \"%s\".\n", GNUPLOT);
         exit(2);
