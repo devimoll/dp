@@ -9,28 +9,29 @@
 #define _USE_MATH_DEFINES
 #define GNUPLOT "gnuplot -persist"
 
-// 勾配の設定がマジックすぎる
+// 最初にgnuplotの存在を確認 あとデータはcsvでも出力
+// 勾配と速度制限の設定がマジックすぎる
 // difsolve関数が長い
 
 // constants that can be changed as needed
-const double tl = 1400; // 線路長 track length
-const double max_vel = 100; // 最高速度 maximum velocity[km/h]
-const double sim_time = 100;   // simulation time
-const double weight = 353; // [ton]
+const double tl = 800; // 線路長 track length
+const double max_vel = 40; // 最高速度 maximum velocity[km/h]
+const double sim_time = 120;   // simulation time
+const double weight = 32; // [ton]
 // train's resistances correspond to train's speed [km/h]
 const double a = 14.2974;
 const double b = 0.1949;
 const double c = 0.8095;
 // Track gradient
 const double p1 = 0;
-const double p2 = 25;
+const double p2 = 20;
 const double p3 = 0;
-const double z1 = 200;
-const double z2 = 350;
+const double z1 = 300;
+const double z2 = 500;
 const double z3 = 800;
 const double g = 9.8; // gravitational constant [m/s^2]
-const double l = 30;  // train's length[m]
-std::vector<double> u_notch{-1, -0.9, -0.5, -0.1, 0, 0.1, 0.5, 0.9, 1};
+const double l = 24;  // train's length[m]
+std::vector<double> u_notch{-1, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
 const double pen1 = std::pow(10, 6);
 const double pen2 = std::pow(10, 100);
 const double penalty_v = 1;
@@ -40,7 +41,7 @@ const int nproc = std::thread::hardware_concurrency();   // number of processer(
 //const int nproc = 1;
 
 
-// do not edit from this line
+// do not edit under from this line
 void add_m_m(double*, const double*, const double*);
 void sum_m_m(double*, const double*, const double*);
 void mul_m_v(double*, const double*, const double*);
@@ -51,8 +52,8 @@ void inv_m(double*, const double*);
 void solve_next_state(double*, const double*, const double*, const double*, const double, const double);
 double ms2kmh(double);
 double kmh2ms(double);
-void traction(double*, double*, const double, const double);
-void difsolve(double*, double*, double*, double, double, double, const double);
+void traction(double*, double*, const double, const double, const double);
+void difsolve(double*, double*, double*, double, double, double, const double, const double);
 double value2index(double, const std::vector<double>&, int);
 double interpolate(const std::vector<std::vector<double>>&, double, double);
 void calc(int, int, int);
@@ -85,13 +86,14 @@ std::vector<double> t_latt(t_size);
 
 std::vector<std::vector<std::vector<double>>> e_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
 std::vector<std::vector<std::vector<double>>> u_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
+std::vector<std::vector<std::vector<double>>> i_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
 
 std::vector<double> u_solved(t_size, 0);
 std::vector<double> v_solved(t_size, 0);
 std::vector<double> x_solved(t_size, 0);
 std::vector<double> e_solved(t_size, 0);
 std::vector<double> p_solved(t_size, 0);
-double energy;
+std::vector<double> i_solved(t_size, 0);
 
 
 int main()
@@ -124,7 +126,7 @@ int main()
     printf("x_error = %f\n"
         "v_error = %f\n"
         "energy = %f kWh\n",
-        x_error, v_error, energy);
+        x_error, v_error, e_solved.back());
 
     draw_graphs();
 
@@ -204,7 +206,12 @@ inline double kmh2ms(double v)
     return v / 3.6;
 }
 
-void traction(double *F, double *dFdv, const double u, const double v)
+double fc_voltage(double i)
+{
+    return -0.4 * i + 600;
+}
+
+void traction(double *F, double *dFdv, const double u, const double v, const double current)
 {
     double f_a = 3.3 * 1000 / 3.6; // [N/t]
     double v_a1 = kmh2ms(40);    // [km/3.5*1000/3.6h]->[m/s]
@@ -217,6 +224,15 @@ void traction(double *F, double *dFdv, const double u, const double v)
     *F = 0;
     *dFdv = 0;
 
+    // 堀内さんP.18式(2.22), 野田さんP.21
+    double Vn = 600;    // 電動機の定格電圧
+    double Vin = fc_voltage(current);    // 入力電圧
+    //printf("%f ", Vin);
+    v_a1 *= (Vin / Vn);
+    v_a2 *= (Vin / Vn);
+    v_b *= (Vin / Vn);
+
+    // f_a, f_bとuの積が先行研究でのf_aやf_0か
     if (u > 0) {
         if (v < v_a1) {
             *F = f_a * u;
@@ -271,14 +287,16 @@ void solve_next_state(double *next_xv, const double *curr_xv, const double *A, c
 }
 
 // dt秒後のxとvと、dt秒間のdWを計算して、第1~3引数に値を入れる。
-void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double curr_v, double dt, const double u)
+void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double curr_v, double dt, const double u, double current)
 {
     curr_v = kmh2ms(curr_v);
+    // calculate traction force
+    // 引張力
     double F;
     double dFdv;
-    // calculate traction force
-    traction(&F, &dFdv, u, curr_v);
+    traction(&F, &dFdv, u, curr_v, current);
     // calculation for train's resistance
+    // 列車抵抗
     double R;
     double dRdv;
     if (curr_v > 0) {
@@ -366,7 +384,7 @@ void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double 
     double dv = next_xv[1] - curr_xv[1];
     double vn = next_xv[1]; //[m/s]
     double Fn, dev_null;
-    traction(&Fn, &dev_null, u, curr_v); //[N] dFdvは不要
+    traction(&Fn, &dev_null, u, curr_v, current); // dFdvは不要
     Fn *= weight;
 
 /*
@@ -379,10 +397,12 @@ void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double 
     next_xv[1] = ms2kmh(next_xv[1]);
     // efficiency
     double eta_a = 0.9;
-    double eta_b = 0.8;
+    //double eta_b = 0.8;
+    // 回生なし
+    double eta_b = 0;
     //
 
-    ////energy calculation
+    ////energy calculation 今と次の瞬間の電力の平均に時間をかけて電力量
     if (u > 0) {
         *dW  = 0.5 * (F * curr_v + Fn * vn ) * dt / eta_a / 3600 / 1000 * 1.1;  //[m/s]*[N]*[s]=[J]=1/(3.6*10^6)[kWh]
         //*dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt / eta / 3600 / 1000 *1.1;  
@@ -394,6 +414,7 @@ void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double 
     }
     else {
         *dW  =  0.5 * (F * curr_v + Fn * vn ) * dt * eta_b / 3600 / 1000 * 1.1;
+
         //*dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt * eta / 3600 / 1000 *1.1 ;   
         //*dW  = (F + 0.5*dFdv*dv) * dx * eta / 3600 / 1000;     
         //*dW  = (a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt * eta / 3600 / 1000;     
@@ -490,22 +511,35 @@ void calc(int step, int j, int dt)
         double e_opt0 = pen1;
         double u_opt0 = 0;
         double e_opt1 = 0;
+        double i_opt0 = 0;
+        double i_opt1 = 0;
         for (int u = 0; u < notch_count; ++u) {
             double next_x;
             double next_v;
             double dW;
-            difsolve(&next_x, &next_v, &dW, x_latt[j], v_latt[k], dt, u_notch[u]);
+            difsolve(&next_x, &next_v, &dW, x_latt[j], v_latt[k], dt, u_notch[u], i_opt[step + 1][j][k]);
+            double hokidenryoku = 0.01;
+            i_opt1 = (dW + hokidenryoku) / (dt / 3600.) * 1000 / fc_voltage(i_opt[step + 1][j][k]); // [A]
+            // 電流が範囲外
+            if (i_opt1 < 0 || 500 < i_opt1) {
+                e_opt1 = pen2;
+            }
+            // 電圧が低すぎる
+            else if (fc_voltage(i_opt1) < 400) {
+                e_opt1 = pen2;
+            }
+            //printf("\n%f, %f\n", dW, i_opt1);
             // speed limitation線路の形状による速度制限
-            if (x_latt[j] < 100 && v_latt[k] >= 60) {
+            else if (x_latt[j] < 100 && v_latt[k] >= 60) {
                 e_opt1 = pen1;   
             }
-            else if (x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 40) {
+            else if (x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 90) {
                 e_opt1 = pen1;   
             }
-            else if (x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 25) {
+            else if (x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 95) {
                 e_opt1 = pen1;   
             }
-            else if (x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 40) {
+            else if (x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 90) {
                 e_opt1 = pen1;   
             }
             /*  
@@ -518,11 +552,14 @@ void calc(int step, int j, int dt)
             if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
                 e_opt0 = e_opt1;
                 u_opt0 = u_notch[u];
+                i_opt0 = i_opt1;
             }
         }
         // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーが求まった。
         e_opt[step][j][k] = e_opt0;
         u_opt[step][j][k] = u_opt0;
+        i_opt[step][j][k] = i_opt0;
+        //printf("\n%f\n", i_opt[step][j][k]);
     }
 }
 
@@ -621,6 +658,7 @@ void do_backward_search()
     for (int i = 0; i < x_size; ++i) {
         for (int j = 0; j < v_size; ++j) {
             e_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
+            i_opt.back()[i][j] = 0;
         }
     }
     // 最後から2番目より最初まで探索
@@ -646,17 +684,18 @@ void do_backward_search()
 
 void do_forward_search()
 {
-    energy = 0;
     v_solved[0] = v_i;
     x_solved[0] = x_i;
+    i_solved[0] = 0;
 
     //start searching from the intial time
     for (int t = 0; t < t_size - 1; ++t) {
         double dt = t_latt[t + 1] - t_latt[t];
         u_solved[t] = interpolate(u_opt[t], x_solved[t], v_solved[t]);
-        difsolve(&x_solved[t + 1], &v_solved[t + 1], &p_solved[t], x_solved[t], v_solved[t], dt, u_solved[t]);
-        energy += p_solved[t];
-        e_solved[t + 1] = energy;
+        difsolve(&x_solved[t + 1], &v_solved[t + 1], &p_solved[t], x_solved[t], v_solved[t], dt, u_solved[t], i_solved[t]);
+        e_solved[t + 1] = e_solved[t] + p_solved[t];
+        double hokidenryoku = 0.01;
+        i_solved[t + 1] = (p_solved[t] + hokidenryoku) / (dt / 3600) * 1000 / fc_voltage(i_solved[t]); // [A]
     }
     // 逆方向探索をすると、ある地点からの終状態へ行くまでの最適なノッチが全地点で計算されて、初期値を決めれば計算されたノッチを用いて軌道を生成できる
     // したがってロバスト性が高い ということか
@@ -671,25 +710,26 @@ void draw_graphs()
 
     // 軸の最大値 10刻みにする
     int v_axis_max = std::ceil(*max_element(v_solved.begin(), v_solved.end()) * 0.1) * 10;
-    // 5刻みにする
-    int e_axis_max = std::ceil(*max_element(e_solved.begin(), e_solved.end()) * 0.2) * 5;
+    // 1刻みにする
+    int e_axis_max = std::ceil(*max_element(e_solved.begin(), e_solved.end()));
 
     FILE *gp;
     if ((gp = popen(GNUPLOT, "w")) == NULL) {
         fprintf(stderr, "ERROR: cannot open \"%s\".\n", GNUPLOT);
         exit(1);
     }
+    fprintf(gp, "set terminal wxt size 600,700\n");
 
     // 誤差やペナルティなど
     fprintf(gp, "set label 1 at screen 0.1, 0.95 \"energy= %f kWh, p_x= %f, p_v= %f, e_x= %f, e_v= %f\"\n",
-    energy, penalty_x, penalty_v, x_error, v_error);
+    e_solved.back(), penalty_x, penalty_v, x_error, v_error);
 
     // 運転曲線
     fprintf(gp, "set multiplot\n\
     set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
-    set tmargin screen 0.9\n\
-    set bmargin screen 0.7\n\
+    set tmargin screen 0.923\n\
+    set bmargin screen 0.77\n\
     set xlabel \"Distance [m]\"\n\
     set xtics nomirror\n\
     set ylabel \"Speed [km/h]\"\n\
@@ -700,8 +740,8 @@ void draw_graphs()
     fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
     fprintf(gp, "set yrange [%d:%d]\n", 0, v_axis_max);
     fprintf(gp, "set y2range [%d:%d]\n", 0, t_size);
-    fprintf(gp, "plot '-' with lines linetype 1 notitle axis x1y1, ");
-    fprintf(gp, "'-' with lines linetype 2 notitle axis x1y2\n");
+    fprintf(gp, "plot '-' with lines linetype 1 title \"Speed\" axis x1y1, ");
+    fprintf(gp, "'-' with lines linetype 2 title \"Time\" axis x1y2\n");
     for (int i = 0; i < t_size; ++i) {
         fprintf(gp, "%f\t%f\n", x_solved[i], v_solved[i]);
     }
@@ -714,10 +754,9 @@ void draw_graphs()
     // エネルギ
     fprintf(gp, "set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
-    set tmargin screen 0.6\n\
-    set bmargin screen 0.4\n\
+    set tmargin screen 0.69\n\
+    set bmargin screen 0.54\n\
     set ylabel \"Energy [kWh]\"\n\
-    set noy2tics\n\
     set noy2label\n\
     ");
     fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
@@ -729,13 +768,42 @@ void draw_graphs()
     }
     fprintf(gp, "e\n");
 
+    // 電流、電圧
+    std::vector<double> voltage_solved(t_size);
+    for (int i = 0; i < t_size; ++i) {
+        voltage_solved[i] = fc_voltage(i_solved[i]);
+    }
+    fprintf(gp, "set lmargin screen 0.1\n\
+    set rmargin screen 0.9\n\
+    set tmargin screen 0.46\n\
+    set bmargin screen 0.31\n\
+    set ylabel \"Current [A]\"\n\
+    set y2label \"Voltage [V]\"\n\
+    ");
+    fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
+    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(i_solved.begin(), i_solved.end()), *std::max_element(i_solved.begin(), i_solved.end()));
+    fprintf(gp, "set y2range [%f:%f]\n", *std::min_element(voltage_solved.begin(), voltage_solved.end()), *std::max_element(voltage_solved.begin(), voltage_solved.end()));
+    fprintf(gp, "plot '-' with lines linetype 1 title \"Current\" axis x1y1, ");
+    fprintf(gp, "'-' with lines linetype 2 title \"Voltage\" axis x1y2\n");
+
+    for (int i = 0; i < t_size; ++i) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], i_solved[i]);
+    }
+    fprintf(gp, "e\n");
+    for (int i = 0; i < t_size; i++) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], voltage_solved[i]);
+    }
+    fprintf(gp, "e\n");
+
     // ノッチ
     fprintf(gp, "set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
-    set tmargin screen 0.3\n\
-    set bmargin screen 0.1\n\
+    set tmargin screen 0.23\n\
+    set bmargin screen 0.077\n\
     set ylabel \"Notch\"\n\
     set xzeroaxis\n\
+    set noy2tics\n\
+    set noy2label\n\
     ");
     fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
     fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(u_notch.begin(), u_notch.end()), *std::max_element(u_notch.begin(), u_notch.end()));
@@ -745,7 +813,6 @@ void draw_graphs()
         fprintf(gp, "%f\t%f\n", x_solved[i], u_solved[i]);
     }
     fprintf(gp, "e\n");
-
 
     if (pclose(gp) == EOF) {
         fprintf(stderr, "Error: cannot close \"%s\".\n", GNUPLOT);
