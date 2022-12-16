@@ -10,7 +10,7 @@
 #define GNUPLOT "gnuplot -persist"
 
 // 最初にgnuplotの存在を確認 あとデータはcsvでも出力
-// 勾配と速度制限の設定がマジックすぎる
+// 勾配と速度制限とグラフ描画の設定がマジックすぎる
 // difsolve関数が長い
 
 // constants that can be changed as needed
@@ -208,6 +208,7 @@ inline double kmh2ms(double v)
 
 double fc_voltage(double i)
 {
+    return -0.00001 * i + 600;
     return -0.4 * i + 600;
 }
 
@@ -524,6 +525,12 @@ void calc(int step, int j, int dt)
             if (i_opt1 < 0 || 500 < i_opt1) {
                 e_opt1 = pen2;
             }
+            //else if (i_opt1 < 20) {
+            //    e_opt1 = pen1;
+            //}
+            //else if (i_opt1 > 200) {
+            //    e_opt1 = pen1;
+            //}
             // 電圧が低すぎる
             else if (fc_voltage(i_opt1) < 400) {
                 e_opt1 = pen2;
@@ -718,7 +725,7 @@ void draw_graphs()
         fprintf(stderr, "ERROR: cannot open \"%s\".\n", GNUPLOT);
         exit(1);
     }
-    fprintf(gp, "set terminal wxt size 600,700\n");
+    fprintf(gp, "set terminal wxt size 600,800\n");
 
     // 誤差やペナルティなど
     fprintf(gp, "set label 1 at screen 0.1, 0.95 \"energy= %f kWh, p_x= %f, p_v= %f, e_x= %f, e_v= %f\"\n",
@@ -727,7 +734,7 @@ void draw_graphs()
     // 運転曲線
     fprintf(gp, "set multiplot\n\
     set lmargin screen 0.1\n\
-    set rmargin screen 0.9\n\
+    set rmargin screen 0.88\n\
     set tmargin screen 0.923\n\
     set bmargin screen 0.77\n\
     set xlabel \"Distance [m]\"\n\
@@ -753,7 +760,8 @@ void draw_graphs()
 
     // エネルギ
     fprintf(gp, "set lmargin screen 0.1\n\
-    set rmargin screen 0.9\n\
+    set lmargin screen 0.1\n\
+    set rmargin screen 0.88\n\
     set tmargin screen 0.69\n\
     set bmargin screen 0.54\n\
     set ylabel \"Energy [kWh]\"\n\
@@ -774,7 +782,8 @@ void draw_graphs()
         voltage_solved[i] = fc_voltage(i_solved[i]);
     }
     fprintf(gp, "set lmargin screen 0.1\n\
-    set rmargin screen 0.9\n\
+    set lmargin screen 0.1\n\
+    set rmargin screen 0.88\n\
     set tmargin screen 0.46\n\
     set bmargin screen 0.31\n\
     set ylabel \"Current [A]\"\n\
@@ -798,6 +807,8 @@ void draw_graphs()
     // ノッチ
     fprintf(gp, "set lmargin screen 0.1\n\
     set rmargin screen 0.9\n\
+    set lmargin screen 0.1\n\
+    set rmargin screen 0.88\n\
     set tmargin screen 0.23\n\
     set bmargin screen 0.077\n\
     set ylabel \"Notch\"\n\
