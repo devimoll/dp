@@ -746,7 +746,7 @@ void draw_graphs()
     ");
     fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
     fprintf(gp, "set yrange [%d:%d]\n", 0, v_axis_max);
-    fprintf(gp, "set y2range [%d:%d]\n", 0, t_size);
+    fprintf(gp, "set y2range [%d:%f]\n", 0, sim_time);
     fprintf(gp, "plot '-' with lines linetype 1 title \"Speed\" axis x1y1, ");
     fprintf(gp, "'-' with lines linetype 2 title \"Time\" axis x1y2\n");
     for (int i = 0; i < t_size; ++i) {
