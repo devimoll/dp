@@ -31,7 +31,8 @@ const double z2 = 500;
 const double z3 = 800;
 const double g = 9.8; // gravitational constant [m/s^2]
 const double l = 24;  // train's length[m]
-std::vector<double> u_notch{-1, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
+//std::vector<double> u_notch{-1, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
+std::vector<double> u_notch{-1, -0.99, -0.98, -0.96, -0.94, -0.92, -0.9, -0.85, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.15, -0.1, -0.08, -0.06, -0.04, -0.02, -0.01, 0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98, 0.99, 1};
 const double pen1 = std::pow(10, 6);
 const double pen2 = std::pow(10, 10);
 const double penalty_v = 1;
@@ -39,6 +40,7 @@ const double penalty_x = 1;
 // スレッド数
 const int nproc = std::thread::hardware_concurrency();   // number of processer(実際はスレッド数)
 //const int nproc = 1;
+std::vector<std::vector<double>> efficiency_of_fc = {{10, 0.3515}, {17.14, 0.4771}, {31.43, 0.5143}, {74.29, 0.5314}, {104.29, 0.55}, {134.29, 0.5314}, {354.29, 0.4714}, {500, 0.3857}};    // Current[A], Efficiency[%]
 
 
 // do not edit under from this line
@@ -224,13 +226,12 @@ double linear_approximation(double x, double x1, double x2, double y1, double y2
 // 燃料電池の効率を区間ごとに線形近似
 double fc_efficiency(double i)
 {
-    std::vector<std::vector<double>> discontinuities = {{10, 0.3515}, {17.14, 0.4771}, {31.43, 0.5143}, {74.29, 0.5314}, {104.29, 0.55}, {134.29, 0.5314}, {354.29, 0.4714}, {500, 0.3857}};    // Current[A], Efficiency[%]
-    if (i < discontinuities[0][0]) {
+    if (i < efficiency_of_fc[0][0]) {
         return 0;
     }
-    for (int j = 1; j < discontinuities.size(); j++) {
-        if (i < discontinuities[j][0]) {
-            return linear_approximation(i, discontinuities[j - 1][0], discontinuities[j][0], discontinuities[j - 1][1], discontinuities[j][1]);
+    for (int j = 1; j < efficiency_of_fc.size(); j++) {
+        if (i < efficiency_of_fc[j][0]) {
+            return linear_approximation(i, efficiency_of_fc[j - 1][0], efficiency_of_fc[j][0], efficiency_of_fc[j - 1][1], efficiency_of_fc[j][1]);
         }
     }
     return 0;
