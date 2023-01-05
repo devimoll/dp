@@ -33,7 +33,7 @@ const double g = 9.8; // gravitational constant [m/s^2]
 const double l = 24;  // train's length[m]
 std::vector<double> u_notch{-1, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
 const double pen1 = std::pow(10, 6);
-const double pen2 = std::pow(10, 100);
+const double pen2 = std::pow(10, 10);
 const double penalty_v = 1;
 const double penalty_x = 1;
 // スレッド数
@@ -52,6 +52,9 @@ void inv_m(double*, const double*);
 void solve_next_state(double*, const double*, const double*, const double*, const double, const double);
 double ms2kmh(double);
 double kmh2ms(double);
+double fc_voltage(double);
+double linear_approximation(double, double, double, double, double);
+double fc_efficiency(double);
 void traction(double*, double*, const double, const double, const double);
 void difsolve(double*, double*, double*, double, double, double, const double, const double);
 double value2index(double, const std::vector<double>&, int);
@@ -86,7 +89,8 @@ std::vector<double> t_latt(t_size);
 
 std::vector<std::vector<std::vector<double>>> e_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
 std::vector<std::vector<std::vector<double>>> u_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
-std::vector<std::vector<std::vector<double>>> i_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
+std::vector<std::vector<std::vector<double>>> i_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // 全電流
+std::vector<std::vector<std::vector<double>>> h_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // 水素消費量
 
 std::vector<double> u_solved(t_size, 0);
 std::vector<double> v_solved(t_size, 0);
@@ -94,6 +98,7 @@ std::vector<double> x_solved(t_size, 0);
 std::vector<double> e_solved(t_size, 0);
 std::vector<double> p_solved(t_size, 0);
 std::vector<double> i_solved(t_size, 0);
+std::vector<double> h_solved(t_size, 0);
 
 
 int main()
@@ -208,8 +213,27 @@ inline double kmh2ms(double v)
 
 double fc_voltage(double i)
 {
-    return -0.00001 * i + 600;
     return -0.4 * i + 600;
+}
+
+double linear_approximation(double x, double x1, double x2, double y1, double y2)
+{
+    return (y2 - y1) / (x2 - x1) * (x - x1) + y1;
+}
+
+// 燃料電池の効率を区間ごとに線形近似
+double fc_efficiency(double i)
+{
+    std::vector<std::vector<double>> discontinuities = {{10, 0.3515}, {17.14, 0.4771}, {31.43, 0.5143}, {74.29, 0.5314}, {104.29, 0.55}, {134.29, 0.5314}, {354.29, 0.4714}, {500, 0.3857}};    // Current[A], Efficiency[%]
+    if (i < discontinuities[0][0]) {
+        return 0;
+    }
+    for (int j = 1; j < discontinuities.size(); j++) {
+        if (i < discontinuities[j][0]) {
+            return linear_approximation(i, discontinuities[j - 1][0], discontinuities[j][0], discontinuities[j - 1][1], discontinuities[j][1]);
+        }
+    }
+    return 0;
 }
 
 void traction(double *F, double *dFdv, const double u, const double v, const double current)
@@ -514,6 +538,8 @@ void calc(int step, int j, int dt)
         double e_opt1 = 0;
         double i_opt0 = 0;
         double i_opt1 = 0;
+        double h_opt0 = pen1;
+        double h_opt1 = 0;
         for (int u = 0; u < notch_count; ++u) {
             double next_x;
             double next_v;
@@ -521,51 +547,115 @@ void calc(int step, int j, int dt)
             difsolve(&next_x, &next_v, &dW, x_latt[j], v_latt[k], dt, u_notch[u], i_opt[step + 1][j][k]);
             double hokidenryoku = 0.01;
             i_opt1 = (dW + hokidenryoku) / (dt / 3600.) * 1000 / fc_voltage(i_opt[step + 1][j][k]); // [A]
-            // 電流が範囲外
-            if (i_opt1 < 0 || 500 < i_opt1) {
-                e_opt1 = pen2;
+            const double voltage_min = 400;
+            if (1) {    // 水素消費量最小
+                // 電流が範囲外
+                if (i_opt1 < 0 || 500 < i_opt1) {
+                    h_opt1 = pen1;
+                }
+                //else if (i_opt1 < 20) {
+                //    e_opt1 = pen1;
+                //}
+                //else if (i_opt1 > 200) {
+                //    e_opt1 = pen1;
+                //}
+                // 電圧が低すぎる
+                else if (fc_voltage(i_opt1) < voltage_min) {
+                    h_opt1 = pen1;
+                }
+                //printf("\n%f, %f\n", dW, i_opt1);
+                // speed limitation線路の形状による速度制限
+                else if (x_latt[j] < 100 && v_latt[k] >= 60) {
+                    h_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 90) {
+                    h_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 95) {
+                    h_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 90) {
+                    h_opt1 = pen1;   
+                }
+                /*  
+                else if ((x_latt[j] > x_latt[x_latt.size() - 1])) {
+                    e_opt1 = pen2;   
+                }*/
+                else {
+                    e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program
+                    double fc_e = fc_efficiency(i_opt1);
+                    if (fc_e == 0) {
+                        h_opt1 = pen1;
+                    }
+                    else {
+                        h_opt1 = dW / fc_e + interpolate(h_opt[step + 1], next_x, next_v);
+                    }
+                //printf("%f ", h_opt1);
+                }
+                if (h_opt1 < h_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
+                    e_opt0 = e_opt1;
+                    u_opt0 = u_notch[u];
+                    i_opt0 = i_opt1;
+                    h_opt0 = h_opt1;
+                }
             }
-            //else if (i_opt1 < 20) {
-            //    e_opt1 = pen1;
-            //}
-            //else if (i_opt1 > 200) {
-            //    e_opt1 = pen1;
-            //}
-            // 電圧が低すぎる
-            else if (fc_voltage(i_opt1) < 400) {
-                e_opt1 = pen2;
-            }
-            //printf("\n%f, %f\n", dW, i_opt1);
-            // speed limitation線路の形状による速度制限
-            else if (x_latt[j] < 100 && v_latt[k] >= 60) {
-                e_opt1 = pen1;   
-            }
-            else if (x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 90) {
-                e_opt1 = pen1;   
-            }
-            else if (x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 95) {
-                e_opt1 = pen1;   
-            }
-            else if (x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 90) {
-                e_opt1 = pen1;   
-            }
-            /*  
-            else if ((x_latt[j] > x_latt[x_latt.size() - 1])) {
-                e_opt1 = pen2;   
-            }*/
-            else {
-                e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program
-            }
-            if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
-                e_opt0 = e_opt1;
-                u_opt0 = u_notch[u];
-                i_opt0 = i_opt1;
+            else {  // 消費エネルギー最小
+                // 電流が範囲外
+                if (i_opt1 < 0 || 500 < i_opt1) {
+                    e_opt1 = pen1;
+                }
+                //else if (i_opt1 < 20) {
+                //    e_opt1 = pen1;
+                //}
+                //else if (i_opt1 > 200) {
+                //    e_opt1 = pen1;
+                //}
+                // 電圧が低すぎる
+                else if (fc_voltage(i_opt1) < voltage_min) {
+                    e_opt1 = pen1;
+                }
+                //printf("\n%f, %f\n", dW, i_opt1);
+                // speed limitation線路の形状による速度制限
+                else if (x_latt[j] < 100 && v_latt[k] >= 60) {
+                    e_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 100 && x_latt[j] < 450 && v_latt[k] >= 90) {
+                    e_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 450 && x_latt[j] < 550 && v_latt[k] >= 95) {
+                    e_opt1 = pen1;   
+                }
+                else if (x_latt[j] >= 550 && x_latt[j] < 800 && v_latt[k] >= 90) {
+                    e_opt1 = pen1;   
+                }
+                /*  
+                else if ((x_latt[j] > x_latt[x_latt.size() - 1])) {
+                    e_opt1 = pen2;   
+                }*/
+                else {
+                    e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program
+                    double fc_e = fc_efficiency(i_opt1);
+                    if (fc_e == 0) {
+                        e_opt1 = pen1;
+                    }
+                    else {
+                        h_opt1 = dW / fc_e + interpolate(h_opt[step + 1], next_x, next_v);
+                    }
+                //printf("%f ", h_opt1);
+                }
+                if (e_opt1 < e_opt0) { // finding the optimum notch by evaluating the energy 最小を記憶
+                    e_opt0 = e_opt1;
+                    u_opt0 = u_notch[u];
+                    i_opt0 = i_opt1;
+                    h_opt0 = h_opt1;
+                }
             }
         }
-        // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーが求まった。
+        // 消費エネルギーが最小になるノッチと、そのときの消費エネルギーと、電流が求まった。
         e_opt[step][j][k] = e_opt0;
         u_opt[step][j][k] = u_opt0;
         i_opt[step][j][k] = i_opt0;
+        h_opt[step][j][k] = h_opt0;
         //printf("\n%f\n", i_opt[step][j][k]);
     }
 }
@@ -666,6 +756,7 @@ void do_backward_search()
         for (int j = 0; j < v_size; ++j) {
             e_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
             i_opt.back()[i][j] = 0;
+            h_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
         }
     }
     // 最後から2番目より最初まで探索
@@ -694,6 +785,7 @@ void do_forward_search()
     v_solved[0] = v_i;
     x_solved[0] = x_i;
     i_solved[0] = 0;
+    h_solved[0] = 0;
 
     //start searching from the intial time
     for (int t = 0; t < t_size - 1; ++t) {
@@ -703,6 +795,7 @@ void do_forward_search()
         e_solved[t + 1] = e_solved[t] + p_solved[t];
         double hokidenryoku = 0.01;
         i_solved[t + 1] = (p_solved[t] + hokidenryoku) / (dt / 3600) * 1000 / fc_voltage(i_solved[t]); // [A]
+        h_solved[t + 1] = (e_solved[t + 1] - e_solved[t]) / fc_efficiency(i_solved[t + 1]);
     }
     // 逆方向探索をすると、ある地点からの終状態へ行くまでの最適なノッチが全地点で計算されて、初期値を決めれば計算されたノッチを用いて軌道を生成できる
     // したがってロバスト性が高い ということか
@@ -728,16 +821,22 @@ void draw_graphs()
     fprintf(gp, "set terminal wxt size 600,800\n");
 
     // 誤差やペナルティなど
-    fprintf(gp, "set label 1 at screen 0.1, 0.95 \"energy= %f kWh, p_x= %f, p_v= %f, e_x= %f, e_v= %f\"\n",
+    fprintf(gp, "set label 1 at screen 0.1, 0.99 \"energy= %f kWh, p_x= %f, p_v= %f, e_x= %f, e_v= %f\"\n",
     e_solved.back(), penalty_x, penalty_v, x_error, v_error);
+    double cumulative_h = 0;
+    for (int i = 0; i < t_size; ++i) {
+        cumulative_h += h_solved[i];
+    }
+    fprintf(gp, "set label 2 at screen 0.1, 0.97 \"水素消費量= %f\"\n",
+    cumulative_h);
 
     // 運転曲線
     fprintf(gp, "set multiplot\n\
-    set lmargin screen 0.1\n\
-    set rmargin screen 0.88\n\
-    set tmargin screen 0.923\n\
-    set bmargin screen 0.77\n\
-    set xlabel \"Distance [m]\"\n\
+    set lmargin screen 0.15\n\
+    set rmargin screen 0.85\n\
+    set tmargin screen 0.95\n\
+    set bmargin screen 0.80\n\
+    #set xlabel \"Distance [m]\"\n\
     set xtics nomirror\n\
     set ylabel \"Speed [km/h]\"\n\
     set ytics nomirror\n\
@@ -758,21 +857,54 @@ void draw_graphs()
     }
     fprintf(gp, "e\n");
 
-    // エネルギ
+    // 消費エネルギ、燃料電池の効率
     fprintf(gp, "set lmargin screen 0.1\n\
-    set lmargin screen 0.1\n\
-    set rmargin screen 0.88\n\
-    set tmargin screen 0.69\n\
-    set bmargin screen 0.54\n\
+    set lmargin screen 0.15\n\
+    set rmargin screen 0.85\n\
+    set tmargin screen 0.75\n\
+    set bmargin screen 0.60\n\
     set ylabel \"Energy [kWh]\"\n\
-    set noy2label\n\
+    set y2label \"Efficiency of Fuel cell [%]\"\n\
     ");
     fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
     fprintf(gp, "set yrange [%d:%d]\n", 0, e_axis_max);
-    fprintf(gp, "plot '-' with lines linetype 1 notitle\n");
+    fprintf(gp, "set y2range [%f:%f]\n", .3, .6);
+    fprintf(gp, "plot '-' with lines linetype 1 title \"Energy\" axis x1y1, ");
+    fprintf(gp, "'-' with lines linetype 2 title \"Efficiency\" axis x1y2\n");
 
     for (int i = 0; i < t_size; ++i) {
         fprintf(gp, "%f\t%f\n", x_solved[i], e_solved[i]);
+    }
+    fprintf(gp, "e\n");
+    for (int i = 0; i < t_size; ++i) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], fc_efficiency(i_solved[i]));
+    }
+    fprintf(gp, "e\n");
+
+    // 瞬時水素消費量、積算水素消費量
+    printf("H2 cons = %f\n", cumulative_h); // ←ここに書くのは良くない
+    fprintf(gp, "set lmargin screen 0.1\n\
+    set lmargin screen 0.15\n\
+    set rmargin screen 0.85\n\
+    set tmargin screen 0.35\n\
+    set bmargin screen 0.20\n\
+    set ylabel \"瞬時水素消費量* [-]\"\n\
+    set y2label \"積算水素消費量* [-]\"\n\
+    ");
+    fprintf(gp, "set xrange [%d:%f]\n", 0, x_f);
+    fprintf(gp, "set yrange [%f:%f]\n", *std::min_element(h_solved.begin(), h_solved.end()), *std::max_element(h_solved.begin(), h_solved.end()));
+    fprintf(gp, "set y2range [%f:%f]\n", 0., cumulative_h);
+    fprintf(gp, "plot '-' with lines linetype 1 title \"瞬時\" axis x1y1, ");
+    fprintf(gp, "'-' with lines linetype 2 title \"積算\" axis x1y2\n");
+
+    for (int i = 0; i < t_size; ++i) {
+        fprintf(gp, "%f\t%f\n", x_solved[i], h_solved[i]);
+    }
+    fprintf(gp, "e\n");
+    cumulative_h = 0;
+    for (int i = 0; i < t_size; ++i) {
+        cumulative_h += h_solved[i];
+        fprintf(gp, "%f\t%f\n", x_solved[i], cumulative_h);
     }
     fprintf(gp, "e\n");
 
@@ -782,10 +914,10 @@ void draw_graphs()
         voltage_solved[i] = fc_voltage(i_solved[i]);
     }
     fprintf(gp, "set lmargin screen 0.1\n\
-    set lmargin screen 0.1\n\
-    set rmargin screen 0.88\n\
-    set tmargin screen 0.46\n\
-    set bmargin screen 0.31\n\
+    set lmargin screen 0.15\n\
+    set rmargin screen 0.85\n\
+    set tmargin screen 0.55\n\
+    set bmargin screen 0.40\n\
     set ylabel \"Current [A]\"\n\
     set y2label \"Voltage [V]\"\n\
     ");
@@ -799,18 +931,17 @@ void draw_graphs()
         fprintf(gp, "%f\t%f\n", x_solved[i], i_solved[i]);
     }
     fprintf(gp, "e\n");
-    for (int i = 0; i < t_size; i++) {
+    for (int i = 0; i < t_size; ++i) {
         fprintf(gp, "%f\t%f\n", x_solved[i], voltage_solved[i]);
     }
     fprintf(gp, "e\n");
 
     // ノッチ
     fprintf(gp, "set lmargin screen 0.1\n\
-    set rmargin screen 0.9\n\
-    set lmargin screen 0.1\n\
-    set rmargin screen 0.88\n\
-    set tmargin screen 0.23\n\
-    set bmargin screen 0.077\n\
+    set lmargin screen 0.15\n\
+    set rmargin screen 0.85\n\
+    set tmargin screen 0.15\n\
+    set bmargin screen 0.05\n\
     set ylabel \"Notch\"\n\
     set xzeroaxis\n\
     set noy2tics\n\
