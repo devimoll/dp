@@ -16,21 +16,22 @@
 // constants that can be changed as needed
 const double tl = 800; // 線路長 track length
 const double max_vel = 40; // 最高速度 maximum velocity[km/h]
-const double sim_time = 120;   // simulation time
+const double sim_time = 110;   // simulation time
 const double weight = 32; // [ton]
 // train's resistances correspond to train's speed [km/h]
 const double a = 14.2974;
 const double b = 0.1949;
 const double c = 0.8095;
-// Track gradient
+// Track gradient 正なら上り、負なら下り勾配 単位はパーミル
 const double p1 = 0;
-const double p2 = 20;
+const double p2 = 15;
 const double p3 = 0;
 const double z1 = 300;
 const double z2 = 500;
 const double z3 = 800;
 const double g = 9.8; // gravitational constant [m/s^2]
 const double l = 24;  // train's length[m]
+const double sc_capacitance = 400;   // [F]
 //std::vector<double> u_notch{-1, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
 std::vector<double> u_notch{-1, -0.99, -0.98, -0.96, -0.94, -0.92, -0.9, -0.85, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.15, -0.1, -0.08, -0.06, -0.04, -0.02, -0.01, 0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98, 0.99, 1};
 const double pen1 = std::pow(10, 6);
@@ -91,8 +92,9 @@ std::vector<double> t_latt(t_size);
 
 std::vector<std::vector<std::vector<double>>> e_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
 std::vector<std::vector<std::vector<double>>> u_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0)));
-std::vector<std::vector<std::vector<double>>> i_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // 全電流
+std::vector<std::vector<std::vector<double>>> i_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // モータと補機に流れる電流
 std::vector<std::vector<std::vector<double>>> h_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // 水素消費量
+std::vector<std::vector<std::vector<double>>> sc_v_opt(t_size, std::vector<std::vector<double>>(x_size, std::vector<double>(v_size, 0))); // supercapacitor(EDLC, 電気二重層キャパシタ)の電圧
 
 std::vector<double> u_solved(t_size, 0);
 std::vector<double> v_solved(t_size, 0);
@@ -100,7 +102,8 @@ std::vector<double> x_solved(t_size, 0);
 std::vector<double> e_solved(t_size, 0);
 std::vector<double> p_solved(t_size, 0);
 std::vector<double> i_solved(t_size, 0);
-std::vector<double> h_solved(t_size, 0);
+std::vector<double> h_solved(t_size, 0);    // hydrogen
+std::vector<double> sc_v_solved(t_size, 0);
 
 
 int main()
@@ -239,6 +242,7 @@ double fc_efficiency(double i)
 
 void traction(double *F, double *dFdv, const double u, const double v, const double current)
 {
+    // ここらへんは定数
     double f_a = 3.3 * 1000 / 3.6; // [N/t]
     double v_a1 = kmh2ms(40);    // [km/3.5*1000/3.6h]->[m/s]
     double v_a2 = kmh2ms(80);   // [km/3.5*1000/3.6h]->[m/s]
@@ -423,14 +427,14 @@ void difsolve(double *next_x, double *next_v, double *dW, double curr_x, double 
     next_xv[1] = ms2kmh(next_xv[1]);
     // efficiency
     double eta_a = 0.9;
-    //double eta_b = 0.8;
+    double eta_b = 0.8;
     // 回生なし
-    double eta_b = 0;
+    //double eta_b = 0;
     //
 
     ////energy calculation 今と次の瞬間の電力の平均に時間をかけて電力量
     if (u > 0) {
-        *dW  = 0.5 * (F * curr_v + Fn * vn ) * dt / eta_a / 3600 / 1000 * 1.1;  //[m/s]*[N]*[s]=[J]=1/(3.6*10^6)[kWh]
+        *dW  = 0.5 * (F * curr_v + Fn * vn ) * dt / eta_a / 3600 / 1000 * 1.1;  //[m/s]*[N]*[s]=[J]=1/(3.6*10^6)[kWh] ←すでに[kWh]に変換されている
         //*dW  = 0.5*(F*curr_v + (F+dFdv*dv)*vn ) * dt / eta / 3600 / 1000 *1.1;  
         //*dW  = (F + 0.5*dFdv*dv) * dx / eta / 3600 / 1000;  
         //*dW  =(a*c)/3*dt^3+(a*d+b*c)/2*dt^2+(b*d)*dt / eta / 3600 / 1000;  
@@ -541,15 +545,23 @@ void calc(int step, int j, int dt)
         double i_opt1 = 0;
         double h_opt0 = pen1;
         double h_opt1 = 0;
+        double sc_v_opt0 = 0;
+        double sc_v_opt1 = 0;
         for (int u = 0; u < notch_count; ++u) {
             double next_x;
             double next_v;
             double dW;
             difsolve(&next_x, &next_v, &dW, x_latt[j], v_latt[k], dt, u_notch[u], i_opt[step + 1][j][k]);
-            double hokidenryoku = 0.01;
-            i_opt1 = (dW + hokidenryoku) / (dt / 3600.) * 1000 / fc_voltage(i_opt[step + 1][j][k]); // [A]
+            const double hokidenryoku = 10;    // Auxiliary power supply [kW]
+            //double P = (dW + hokidenryoku) / dt * 3600 * 1000;
+            double P = ((dW / dt * 3600) + hokidenryoku) * 1000;
+            double sc_next_volt = interpolate(sc_v_opt[step + 1], next_x, next_v);
+            sc_v_opt1 = std::sqrt(std::pow(sc_next_volt, 2) + (2 * P / sc_capacitance));
+            //i_opt1 = P / fc_voltage(i_opt[step + 1][j][k]); // [A]
+            //i_opt1 = (300 - std::sqrt(std::pow(300, 2) - 0.4 * P)) / 0.4;  // 上式のfc_voltageは簡単なiの関数だから式変形して二次方程式を解けば良いだけだった。上式では1 step前のiの値を用いていたが、これで正確なiが求められるはず。解は2つ出るが、大きい方の解は明らかに大きすぎるから小さい方を真の解とする。
+            i_opt1 = P / ((sc_next_volt + sc_v_opt1) / 2); // SCの内部抵抗を考慮していない。後でやる。方程式を立ててニュートン法と差分法で求まる。
             const double voltage_min = 400;
-            if (1) {    // 水素消費量最小
+            if (0) {    // 水素消費量最小
                 // 電流が範囲外
                 if (i_opt1 < 0 || 500 < i_opt1) {
                     h_opt1 = pen1;
@@ -602,7 +614,7 @@ void calc(int step, int j, int dt)
             }
             else {  // 消費エネルギー最小
                 // 電流が範囲外
-                if (i_opt1 < 0 || 500 < i_opt1) {
+                if (500 < i_opt1) {
                     e_opt1 = pen1;
                 }
                 //else if (i_opt1 < 20) {
@@ -612,7 +624,9 @@ void calc(int step, int j, int dt)
                 //    e_opt1 = pen1;
                 //}
                 // 電圧が低すぎる
-                else if (fc_voltage(i_opt1) < voltage_min) {
+                //else if (fc_voltage(i_opt1) < voltage_min) {
+                    
+                else if (sc_v_opt1 < voltage_min) {
                     e_opt1 = pen1;
                 }
                 //printf("\n%f, %f\n", dW, i_opt1);
@@ -634,10 +648,10 @@ void calc(int step, int j, int dt)
                     e_opt1 = pen2;   
                 }*/
                 else {
-                    e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program
+                    e_opt1 = dW + interpolate(e_opt[step + 1], next_x, next_v); // linear interpolation by interpol program ループを繰り返すごとに積算されていく
                     double fc_e = fc_efficiency(i_opt1);
                     if (fc_e == 0) {
-                        e_opt1 = pen1;
+                        //e_opt1 = pen1;
                     }
                     else {
                         h_opt1 = dW / fc_e + interpolate(h_opt[step + 1], next_x, next_v);
@@ -649,6 +663,7 @@ void calc(int step, int j, int dt)
                     u_opt0 = u_notch[u];
                     i_opt0 = i_opt1;
                     h_opt0 = h_opt1;
+                    sc_v_opt0 = sc_v_opt1;
                 }
             }
         }
@@ -657,6 +672,7 @@ void calc(int step, int j, int dt)
         u_opt[step][j][k] = u_opt0;
         i_opt[step][j][k] = i_opt0;
         h_opt[step][j][k] = h_opt0;
+        sc_v_opt[step][j][k] = sc_v_opt0;
         //printf("\n%f\n", i_opt[step][j][k]);
     }
 }
@@ -750,35 +766,81 @@ void init_t_latt()
 
 void do_backward_search()
 {
+    // 二分法でSCの初期電圧を合わせる。
     std::vector<std::thread*> threads(nproc);
-
-    // 終状態
-    for (int i = 0; i < x_size; ++i) {
-        for (int j = 0; j < v_size; ++j) {
-            e_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
-            i_opt.back()[i][j] = 0;
-            h_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
+    double sc_initial_voltage = 600;    // 理想とするSC初期電圧
+    double error = 5;   // SC初期電圧の誤差
+    double prev_sc_final_voltage = 0;
+    double sc_final_voltage = 600;
+    double prev_result = 0; // 前回のSC初期電圧計算結果
+    double result = 0;  // SC初期電圧計算結果
+    while(1){
+        // 終状態
+        for (int i = 0; i < x_size; ++i) {
+            for (int j = 0; j < v_size; ++j) {
+                e_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
+                i_opt.back()[i][j] = 0;
+                h_opt.back()[i][j] = penalty_x * std::abs(x_f - x_latt[i]) + penalty_v * std::abs(v_f - v_latt[j]);
+                //sc_v_opt.back()[i][j] = sc_initial_voltage;
+                sc_v_opt.back()[i][j] = sc_final_voltage;
+            }
         }
+        // 最後から2番目より最初まで探索
+        for (int i = t_size - 2; i >= 0; --i) {
+            printf("\rcalculating %d / %d", t_size - i, t_size);
+            fflush(stdout);
+
+            double dt = t_latt[i + 1] - t_latt[i];
+
+            // multi threading
+            for (int n = 0; n < nproc; ++n) {
+                threads[n] = new std::thread(assign_calculation, i, n, dt);
+            }
+            for (std::thread *thread : threads) {
+                thread->join();
+            }
+            for (std::thread *thread : threads) {
+                delete thread;
+            }
+        }
+        printf("\n");
+        result = interpolate(sc_v_opt[0], x_solved[0], v_solved[0]);
+        printf("sc init volta = %f, sc final volta = %f\n", result, sc_final_voltage);
+        if (std::abs(sc_initial_voltage - prev_result) < std::abs(sc_initial_voltage - result)) {
+            // 行き過ぎて答えから遠ざかった場合
+            // 前回の答えと今回の答えの間に真の解があるはずだから単に平均をとってやり直し。
+            sc_final_voltage = (prev_sc_final_voltage + sc_final_voltage) / 2;
+            continue;
+        }
+
+        if (result >= sc_initial_voltage + error || std::isinf(result)) {
+            if (prev_result >= sc_initial_voltage + error || std::isinf(prev_result)) {
+                prev_sc_final_voltage = sc_final_voltage;
+                sc_final_voltage /= 2;
+            }
+            else {
+                double tmp = sc_final_voltage;
+                sc_final_voltage = (prev_sc_final_voltage + sc_final_voltage) / 2;
+                prev_sc_final_voltage = tmp;
+            }
+        }
+        else if (result <= sc_initial_voltage - error || std::isnan(result)) {
+            if (prev_result <= sc_initial_voltage - error || std::isnan(prev_result)) {
+                prev_sc_final_voltage = sc_final_voltage;
+                sc_final_voltage *= 2;
+            }
+            else {
+                double tmp = sc_final_voltage;
+                sc_final_voltage = (prev_sc_final_voltage + sc_final_voltage) / 2;
+                prev_sc_final_voltage = tmp;
+            }
+        }
+        else {
+            break;
+        }
+
+        prev_result = result;
     }
-    // 最後から2番目より最初まで探索
-    for (int i = t_size - 2; i >= 0; --i) {
-        printf("\rcalculating %d / %d", t_size - i, t_size);
-        fflush(stdout);
-
-        double dt = t_latt[i + 1] - t_latt[i];
-
-        // multi threading
-        for (int n = 0; n < nproc; ++n) {
-            threads[n] = new std::thread(assign_calculation, i, n, dt);
-        }
-        for (std::thread *thread : threads) {
-            thread->join();
-        }
-        for (std::thread *thread : threads) {
-            delete thread;
-        }
-    }
-    printf("\n");
 }
 
 void do_forward_search()
@@ -787,6 +849,7 @@ void do_forward_search()
     x_solved[0] = x_i;
     i_solved[0] = 0;
     h_solved[0] = 0;
+    sc_v_solved[0] = interpolate(sc_v_opt[0], x_solved[0], v_solved[0]);
 
     //start searching from the intial time
     for (int t = 0; t < t_size - 1; ++t) {
@@ -795,7 +858,11 @@ void do_forward_search()
         difsolve(&x_solved[t + 1], &v_solved[t + 1], &p_solved[t], x_solved[t], v_solved[t], dt, u_solved[t], i_solved[t]);
         e_solved[t + 1] = e_solved[t] + p_solved[t];
         double hokidenryoku = 0.01;
-        i_solved[t + 1] = (p_solved[t] + hokidenryoku) / (dt / 3600) * 1000 / fc_voltage(i_solved[t]); // [A]
+        double P = (p_solved[t] + hokidenryoku) / (dt / 3600) * 1000;
+        sc_v_solved[t + 1] = std::sqrt(std::pow(sc_v_solved[t], 2) - (2 * P / sc_capacitance));
+        //i_solved[t + 1] = P / fc_voltage(i_solved[t]); // [A]
+        //i_solved[t + 1] = (300 - std::sqrt(std::pow(300, 2) - 0.4 * P)) / 0.4;  // backword_searchと同じ
+        i_solved[t + 1] = P / ((sc_v_solved[t] + sc_v_solved[t + 1]) / 2);
         h_solved[t + 1] = (e_solved[t + 1] - e_solved[t]) / fc_efficiency(i_solved[t + 1]);
     }
     // 逆方向探索をすると、ある地点からの終状態へ行くまでの最適なノッチが全地点で計算されて、初期値を決めれば計算されたノッチを用いて軌道を生成できる
@@ -912,7 +979,8 @@ void draw_graphs()
     // 電流、電圧
     std::vector<double> voltage_solved(t_size);
     for (int i = 0; i < t_size; ++i) {
-        voltage_solved[i] = fc_voltage(i_solved[i]);
+        //voltage_solved[i] = fc_voltage(i_solved[i]);
+        voltage_solved[i] = sc_v_solved[i];
     }
     fprintf(gp, "set lmargin screen 0.1\n\
     set lmargin screen 0.15\n\
